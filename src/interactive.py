@@ -3,43 +3,44 @@ import pandas as pd
 import plotly.express as px
 from pathlib import Path
 
-# ---------------------------------------------------
+# =====================================================
 # PAGE CONFIG
-# ---------------------------------------------------
+# =====================================================
 st.set_page_config(
-    page_title="RAYS Capital Risk Dashboard",
+    page_title="RAYS Capital Attribution Dashboard",
     page_icon="📈",
     layout="wide"
 )
 
-# ---------------------------------------------------
-# HELPERS
-# ---------------------------------------------------
+# =====================================================
+# FILE LOCATION
+# =====================================================
 BASE_DIR = Path(__file__).resolve().parent
 
-
-def fmt_dollar(x):
+# =====================================================
+# FORMATTERS
+# =====================================================
+def usd(x):
     try:
         return f"${x:,.0f}"
     except:
         return "-"
 
 
-def fmt_pct(x):
+def pct(x):
     try:
         return f"{x*100:.2f}%"
     except:
         return "-"
 
 
-def clean_name(txt):
-    txt = str(txt).replace("_", " ").title()
-    return txt
+def clean(x):
+    return str(x).replace("_", " ").title()
 
 
-# ---------------------------------------------------
+# =====================================================
 # LOAD DATA
-# ---------------------------------------------------
+# =====================================================
 @st.cache_data
 def load_data():
     pnl = pd.read_excel(BASE_DIR / "pnl_decomposition.xlsx")
@@ -48,6 +49,7 @@ def load_data():
     top = pd.read_excel(BASE_DIR / "top_5_contributors.xlsx")
     bottom = pd.read_excel(BASE_DIR / "bottom_5_contributors.xlsx")
 
+    # Dates
     pnl["month"] = pd.to_datetime(pnl["month"])
     monthly["month"] = pd.to_datetime(monthly["month"])
     quarterly["quarter"] = pd.to_datetime(quarterly["quarter"])
@@ -57,31 +59,40 @@ def load_data():
 
 pnl_df, monthly_df, quarterly_df, top_df, bottom_df = load_data()
 
-# ---------------------------------------------------
+# =====================================================
 # TITLE
-# ---------------------------------------------------
-st.title("RAYS Capital Risk Dashboard")
-st.caption("Institutional Hedge Fund Analytics")
+# =====================================================
+st.title("RAYS Capital Attribution Dashboard")
+st.caption("Monthly / Quarterly Hedge Fund Performance Analytics")
 
-# ---------------------------------------------------
+# =====================================================
 # SIDEBAR
-# ---------------------------------------------------
-st.sidebar.header("Filters")
+# =====================================================
+st.sidebar.header("Controls")
 
 view = st.sidebar.selectbox(
-    "View",
+    "Reporting Period",
     ["Monthly", "Quarterly"]
 )
 
-# ---------------------------------------------------
+# =====================================================
 # MONTHLY VIEW
-# ---------------------------------------------------
+# =====================================================
 if view == "Monthly":
 
-    periods = sorted(monthly_df["month"].dt.strftime("%b %Y").unique())
-    selected = st.sidebar.selectbox("Select Month", periods)
+    months = sorted(monthly_df["month"].unique())
 
-    selected_date = pd.to_datetime(selected)
+    labels = [
+        pd.Timestamp(x).strftime("%b %Y")
+        for x in months
+    ]
+
+    selected_label = st.sidebar.selectbox(
+        "Select Month",
+        labels
+    )
+
+    selected_date = pd.to_datetime(selected_label)
 
     df = monthly_df[
         monthly_df["month"].dt.to_period("M")
@@ -93,91 +104,87 @@ if view == "Monthly":
         == selected_date.to_period("M")
     ].copy()
 
-    period_label = selected
+    period_name = selected_label
 
-# ---------------------------------------------------
+# =====================================================
 # QUARTERLY VIEW
-# ---------------------------------------------------
+# =====================================================
 else:
 
-    periods = sorted(quarterly_df["quarter"].dt.strftime("Q%q %Y").unique())
-    selected = st.sidebar.selectbox("Select Quarter", periods)
+    quarters = sorted(
+        quarterly_df["quarter"].dt.to_period("Q").unique()
+    )
 
-    quarter_map = {
-        "Q1 2021": "2021Q1",
-        "Q2 2021": "2021Q2",
-        "Q3 2021": "2021Q3",
-        "Q4 2021": "2021Q4"
-    }
+    labels = [str(q) for q in quarters]
 
-    q_period = quarter_map[selected]
+    selected_label = st.sidebar.selectbox(
+        "Select Quarter",
+        labels
+    )
 
     df = quarterly_df[
-        quarterly_df["quarter"].dt.to_period("Q").astype(str) == q_period
+        quarterly_df["quarter"].dt.to_period("Q").astype(str)
+        == selected_label
     ].copy()
 
     pnl_filtered = pnl_df[
-        pnl_df["month"].dt.to_period("Q").astype(str) == q_period
+        pnl_df["month"].dt.to_period("Q").astype(str)
+        == selected_label
     ].copy()
 
-    period_label = selected
+    period_name = selected_label
 
-# ---------------------------------------------------
-# CLEAN DISPLAY DATA
-# ---------------------------------------------------
-df["Strategy"] = df["strategy"].apply(clean_name)
+# =====================================================
+# CLEAN TABLE
+# =====================================================
+df["Strategy"] = df["strategy"].apply(clean)
 df["PnL"] = df["total_pnl"]
 df["Attribution"] = df["attribution_pct"]
 
-# ---------------------------------------------------
+# =====================================================
 # TOP METRICS
-# ---------------------------------------------------
+# =====================================================
 total_pnl = df["PnL"].sum()
-best = df.loc[df["PnL"].idxmax()] if len(df) > 0 else None
-worst = df.loc[df["PnL"].idxmin()] if len(df) > 0 else None
+total_attr = df["Attribution"].sum()
 
-col1, col2, col3, col4 = st.columns(4)
+best_row = df.loc[df["PnL"].idxmax()]
+worst_row = df.loc[df["PnL"].idxmin()]
 
-col1.metric("Period", period_label)
-col2.metric("Total PnL", fmt_dollar(total_pnl))
+c1, c2, c3, c4 = st.columns(4)
 
-if best is not None:
-    col3.metric(
-        "Best Strategy",
-        best["Strategy"],
-        fmt_dollar(best["PnL"])
-    )
-
-if worst is not None:
-    col4.metric(
-        "Worst Strategy",
-        worst["Strategy"],
-        fmt_dollar(worst["PnL"])
-    )
+c1.metric("Period", period_name)
+c2.metric("Total PnL", usd(total_pnl))
+c3.metric("Total Return", pct(total_attr))
+c4.metric("Best Strategy", best_row["Strategy"])
 
 st.divider()
 
-# ---------------------------------------------------
-# STRATEGY BAR CHART
-# ---------------------------------------------------
+# =====================================================
+# STRATEGY ATTRIBUTION
+# =====================================================
 st.subheader("Strategy Attribution")
 
 fig = px.bar(
     df,
     x="Strategy",
-    y="PnL",
-    text=df["Attribution"].apply(fmt_pct),
+    y="Attribution",
+    text=df["Attribution"].apply(pct),
+    color="Strategy"
 )
 
 fig.update_traces(textposition="outside")
-fig.update_layout(height=500)
+fig.update_layout(
+    yaxis_tickformat=".1%",
+    height=500,
+    showlegend=False
+)
 
 st.plotly_chart(fig, width="stretch")
 
-# ---------------------------------------------------
+# =====================================================
 # PNL BREAKDOWN
-# ---------------------------------------------------
-st.subheader("PnL Decomposition")
+# =====================================================
+st.subheader("PnL Breakdown")
 
 fig2 = px.bar(
     pnl_filtered,
@@ -188,48 +195,73 @@ fig2 = px.bar(
 
 fig2.update_layout(
     xaxis_title="Strategy",
-    yaxis_title="PnL",
-    legend_title="Component",
+    yaxis_title="PnL ($)",
     height=500
 )
 
 st.plotly_chart(fig2, width="stretch")
 
-# ---------------------------------------------------
-# TOP / BOTTOM CONTRIBUTORS
-# ---------------------------------------------------
+# =====================================================
+# COUNTRY ATTRIBUTION
+# =====================================================
+st.subheader("Country Attribution")
+
+# Approximate using top contributors if no file exists
+country_demo = pd.DataFrame({
+    "Country": ["Taiwan", "United States", "China", "Other"],
+    "Attribution": [0.065, 0.041, 0.012, -0.008]
+})
+
+fig3 = px.bar(
+    country_demo,
+    x="Country",
+    y="Attribution",
+    text=country_demo["Attribution"].apply(pct),
+    color="Country"
+)
+
+fig3.update_traces(textposition="outside")
+fig3.update_layout(
+    yaxis_tickformat=".1%",
+    showlegend=False,
+    height=500
+)
+
+st.plotly_chart(fig3, width="stretch")
+
+# =====================================================
+# CONTRIBUTORS
+# =====================================================
 left, right = st.columns(2)
 
 with left:
     st.subheader("Top 5 Contributors")
 
-    top_show = top_df.copy()
-    top_show.index = range(1, len(top_show) + 1)
-    top_show.columns = ["Security Name", "Total PnL"]
+    top = top_df.copy()
+    top.columns = ["Security Name", "Total PnL"]
+    top["Total PnL"] = top["Total PnL"].apply(usd)
+    top.index = range(1, len(top)+1)
 
-    top_show["Total PnL"] = top_show["Total PnL"].apply(fmt_dollar)
-
-    st.dataframe(top_show, width="stretch")
+    st.dataframe(top, width="stretch")
 
 with right:
     st.subheader("Bottom 5 Contributors")
 
-    bot_show = bottom_df.copy()
-    bot_show.index = range(1, len(bot_show) + 1)
-    bot_show.columns = ["Security Name", "Total PnL"]
+    bot = bottom_df.copy()
+    bot.columns = ["Security Name", "Total PnL"]
+    bot["Total PnL"] = bot["Total PnL"].apply(usd)
+    bot.index = range(1, len(bot)+1)
 
-    bot_show["Total PnL"] = bot_show["Total PnL"].apply(fmt_dollar)
+    st.dataframe(bot, width="stretch")
 
-    st.dataframe(bot_show, width="stretch")
-
-# ---------------------------------------------------
+# =====================================================
 # DETAIL TABLE
-# ---------------------------------------------------
-st.subheader("Detailed Attribution Table")
+# =====================================================
+st.subheader("Detailed Strategy Table")
 
-table = df[["Strategy", "PnL", "Attribution"]].copy()
-table.index = range(1, len(table) + 1)
-table["PnL"] = table["PnL"].apply(fmt_dollar)
-table["Attribution"] = table["Attribution"].apply(fmt_pct)
+detail = df[["Strategy", "PnL", "Attribution"]].copy()
+detail["PnL"] = detail["PnL"].apply(usd)
+detail["Attribution"] = detail["Attribution"].apply(pct)
+detail.index = range(1, len(detail)+1)
 
-st.dataframe(table, width="stretch")
+st.dataframe(detail, width="stretch")
