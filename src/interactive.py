@@ -1,175 +1,175 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
+from pathlib import Path
 
-# -----------------------------
-# PAGE CONFIG
-# -----------------------------
+# =========================
+# CONFIG
+# =========================
+
 st.set_page_config(page_title="RAYS Risk Dashboard", layout="wide")
 
-# -----------------------------
-# SAFE HELPERS
-# -----------------------------
-def safe_pct(x):
-    if pd.isna(x):
-        return 0.0
-    return x
+BASE_DIR = Path(__file__).resolve().parent.parent
 
-def fmt_money(x):
-    if pd.isna(x):
-        return "$0"
-    return f"${x:,.0f}"
+# =========================
+# DATA LOADING
+# =========================
 
-def fmt_pct(x):
-    if pd.isna(x):
-        return "0.00%"
-    return f"{x*100:.2f}%"
-
-
-def safe_idxmax(df, col):
-    if df is None or df.empty or col not in df.columns:
-        return None
-    if df[col].dropna().empty:
-        return None
-    return df[col].idxmax()
-
-
-# -----------------------------
-# LOAD DATA (replace with your real loader)
-# -----------------------------
 @st.cache_data
 def load_data():
-    # This assumes you already load from SQL or excel
-    # Replace with your engine logic
-    return pd.read_csv("pnl_decomposition.csv") if False else pd.DataFrame()
+    pnl = pd.read_excel(BASE_DIR / "src" / "pnl_decomposition.xlsx")
+    monthly = pd.read_excel(BASE_DIR / "src" / "monthly_strategy_attribution.xlsx")
+    quarterly = pd.read_excel(BASE_DIR / "src" / "quarterly_strategy_attribution.xlsx")
+    top = pd.read_excel(BASE_DIR / "src" / "top_5_contributors.xlsx")
+    bottom = pd.read_excel(BASE_DIR / "src" / "bottom_5_contributors.xlsx")
+
+    # normalize dates
+    pnl["month"] = pd.to_datetime(pnl["month"])
+    monthly["month"] = pd.to_datetime(monthly["month"])
+    quarterly["quarter"] = pd.to_datetime(quarterly["quarter"])
+
+    return pnl, monthly, quarterly, top, bottom
 
 
-# -----------------------------
-# SIDEBAR CONTROLS
-# -----------------------------
-st.sidebar.title("RAYS Dashboard Controls")
+pnl_df, monthly_df, quarterly_df, top_df, bottom_df = load_data()
 
-view_mode = st.sidebar.selectbox(
-    "Time Horizon",
-    ["Monthly", "Quarterly", "Full", "Rolling (coming soon)"]
-)
+# =========================
+# SIDEBAR FILTERS
+# =========================
 
-# -----------------------------
-# LOAD DATA
-# -----------------------------
-df = load_data()
+st.sidebar.title("Filters")
 
-# -----------------------------
-# HANDLE EMPTY DATA SAFELY
-# -----------------------------
-if df.empty:
-    st.warning("No data loaded. Check ingestion pipeline.")
+view_type = st.sidebar.selectbox("View", ["Monthly", "Quarterly"])
+
+if view_type == "Monthly":
+    period = st.sidebar.selectbox(
+        "Select Month",
+        sorted(monthly_df["month"].dt.to_period("M").astype(str).unique())
+    )
+else:
+    period = st.sidebar.selectbox(
+        "Select Quarter",
+        sorted(quarterly_df["quarter"].dt.to_period("Q").astype(str).unique())
+    )
+
+# =========================
+# FILTER DATA
+# =========================
+
+if view_type == "Monthly":
+    selected_period = pd.Period(period, freq="M")
+
+    pnl_filtered = pnl_df[
+        pnl_df["month"].dt.to_period("M") == selected_period
+    ]
+
+    strategy_filtered = monthly_df[
+        monthly_df["month"].dt.to_period("M") == selected_period
+    ]
+
+else:
+    selected_period = pd.Period(period, freq="Q")
+
+    pnl_filtered = pnl_df[
+        pnl_df["month"].dt.to_period("Q") == selected_period
+    ]
+
+    strategy_filtered = quarterly_df[
+        quarterly_df["quarter"].dt.to_period("Q") == selected_period
+    ]
+
+# =========================
+# SAFETY CHECKS
+# =========================
+
+if pnl_filtered.empty:
+    st.warning("No PnL data for selected period")
     st.stop()
 
-# -----------------------------
-# TOTAL PNL
-# -----------------------------
-total_pnl = df["total_pnl"].sum() if "total_pnl" in df else 0
+if strategy_filtered.empty:
+    st.warning("No strategy data for selected period")
+    st.stop()
 
-st.title("RAYS Risk Engine Dashboard")
+# =========================
+# HEADER KPIs
+# =========================
+
+st.title("RAYS Capital Risk Dashboard")
+
+total_pnl = pnl_filtered["total_pnl"].sum()
 
 col1, col2, col3 = st.columns(3)
 
-col1.metric("Total PnL", fmt_money(total_pnl))
-col2.metric("Rows", len(df))
-col3.metric("Strategies", df["strategy"].nunique() if "strategy" in df else 0)
+col1.metric("Total PnL", f"${total_pnl:,.0f}")
+col2.metric("Rows", len(pnl_filtered))
+col3.metric("Period", str(selected_period))
 
-st.divider()
-
-# -----------------------------
+# =========================
 # STRATEGY ATTRIBUTION
-# -----------------------------
+# =========================
+
 st.subheader("Strategy Attribution")
 
-if "strategy" in df.columns:
-    strat = df.groupby("strategy")["total_pnl"].sum().reset_index()
-    strat["pct"] = strat["total_pnl"] / strat["total_pnl"].sum()
+strategy_view = strategy_filtered.copy()
 
-    col1, col2 = st.columns(2)
+strategy_view["total_pnl"] = strategy_view["total_pnl"].astype(float)
+strategy_view["attribution_pct"] = strategy_view["attribution_pct"].astype(float)
 
-    with col1:
-        st.dataframe(
-            strat.sort_values("total_pnl", ascending=False),
-            use_container_width=True
-        )
+st.dataframe(
+    strategy_view.style.format({
+        "total_pnl": "${:,.0f}",
+        "attribution_pct": "{:.2%}"
+    }),
+    use_container_width=True
+)
 
-    with col2:
-        st.bar_chart(strat.set_index("strategy")["total_pnl"])
-
-# -----------------------------
+# =========================
 # TOP / BOTTOM CONTRIBUTORS
-# -----------------------------
-st.subheader("Top / Bottom Contributors")
+# =========================
 
-# expects: security_name + total_pnl
-if "security_name" in df.columns and "total_pnl" in df.columns:
+st.subheader("Top 5 Contributors")
 
-    contrib = df.groupby("security_name")["total_pnl"].sum().reset_index()
+st.dataframe(
+    top_df.head(5).style.format({
+        "total_pnl": "${:,.0f}"
+    }),
+    use_container_width=True
+)
 
-    top5 = contrib.sort_values("total_pnl", ascending=False).head(5)
-    bottom5 = contrib.sort_values("total_pnl", ascending=True).head(5)
+st.subheader("Bottom 5 Contributors")
 
-    c1, c2 = st.columns(2)
+st.dataframe(
+    bottom_df.head(5).style.format({
+        "total_pnl": "${:,.0f}"
+    }),
+    use_container_width=True
+)
 
-    with c1:
-        st.markdown("### Top 5 Contributors")
-        st.dataframe(top5, use_container_width=True)
-
-    with c2:
-        st.markdown("### Bottom 5 Contributors")
-        st.dataframe(bottom5, use_container_width=True)
-
-# -----------------------------
-# COUNTRY ATTRIBUTION (SAFE)
-# -----------------------------
-st.subheader("Country Attribution")
-
-if "country" in df.columns and "total_pnl" in df.columns:
-
-    country = df.groupby("country")["total_pnl"].sum().reset_index()
-    country["pct"] = country["total_pnl"] / country["total_pnl"].sum()
-
-    st.dataframe(country.sort_values("total_pnl", ascending=False),
-                 use_container_width=True)
-
-# -----------------------------
-# SECTOR ATTRIBUTION (SAFE)
-# -----------------------------
-st.subheader("Sector Attribution")
-
-if "sector" in df.columns and "total_pnl" in df.columns:
-
-    sector = df.groupby("sector")["total_pnl"].sum().reset_index()
-    sector["pct"] = sector["total_pnl"] / sector["total_pnl"].sum()
-
-    st.dataframe(sector.sort_values("total_pnl", ascending=False),
-                 use_container_width=True)
-
-# -----------------------------
+# =========================
 # KEY INSIGHTS (SAFE)
-# -----------------------------
+# =========================
+
 st.subheader("Key Insights")
 
-best_strategy = None
-worst_strategy = None
+if not strategy_filtered.empty:
+    best_strategy = strategy_filtered.loc[
+        strategy_filtered["total_pnl"].idxmax(),
+        "strategy"
+    ]
 
-if "strategy" in df.columns and "total_pnl" in df.columns:
-    strat = df.groupby("strategy")["total_pnl"].sum()
+    worst_strategy = strategy_filtered.loc[
+        strategy_filtered["total_pnl"].idxmin(),
+        "strategy"
+    ]
 
-    if not strat.empty:
-        best_strategy = strat.idxmax()
-        worst_strategy = strat.idxmin()
+    st.write(f"📈 Best Strategy: **{best_strategy}**")
+    st.write(f"📉 Worst Strategy: **{worst_strategy}**")
 
-st.write("Best Strategy:", best_strategy if best_strategy else "N/A")
-st.write("Worst Strategy:", worst_strategy if worst_strategy else "N/A")
+else:
+    st.write("No strategy insights available")
 
-# -----------------------------
-# RAW TABLE (DEBUG / ALVIN BACKUP)
-# -----------------------------
-st.subheader("Raw Data (Debug View)")
-st.dataframe(df, use_container_width=True)
+# =========================
+# RAW PNL VIEW (DEBUG)
+# =========================
+
+with st.expander("Raw PnL Data"):
+    st.dataframe(pnl_filtered, use_container_width=True)
